@@ -1,25 +1,3 @@
--- SensibilidadeCamera.luau
--- Troca a sensibilidade de câmera no toque, em qualquer jogo.
---
--- COMO FUNCIONA (importante entender, já que o freedom.lua não funcionava):
--- A Roblox NÃO expõe sensibilidade de toque como propriedade/Instance dentro
--- do CameraModule — por isso ":FindFirstChild('TouchSensitivityX')" sempre
--- dava nil. A forma que funciona é ASSUMIR a câmera (CameraType = Scriptable)
--- e recalcular a rotação manualmente a partir do gesto UserInputService.TouchPan,
--- que é o MESMO evento que o CameraModule nativo usa por baixo dos panos.
--- Ou seja: a gente não "hackeia" nada do jogo, só substitui o controlador de
--- câmera padrão por um nosso, com um multiplicador de sensibilidade ajustável.
---
--- LIMITAÇÕES CONHECIDAS (teste antes de usar em qualquer lugar sério):
--- 1) Não tem anti-clipping (a câmera padrão evita atravessar paredes com
---    raycast; esta versão simples não faz isso ainda).
--- 2) Se o jogo já usa uma câmera Scriptable própria (alguns FPS/jogos
---    autorais fazem isso), os dois vão brigar pelo controle. É exatamente
---    a "interferência" que você desconfiou — por isso o botão ON/OFF abaixo
---    desliga tudo na hora e devolve a câmera padrão.
--- 3) Se a rotação vertical parecer invertida pro seu gosto, troca o sinal
---    de "deltaPitch" (procure o comentário "-- inverter aqui se quiser").
-
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
