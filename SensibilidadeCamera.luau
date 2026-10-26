@@ -7,10 +7,9 @@ local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
 local SAVE_FILE = "camera_sensitivity.txt"
-local DEFAULT_DATA = { sensitivity = 1.0 }
+local DEFAULT_DATA = { sensitivity = 1.0, distance = 10 }
 
--- Mesmo padrão de save/load do MobileButtom (funciona só se o executor
--- tiver writefile/readfile; senão guarda só na sessão)
+-- Mesmo padrão de save/load do MobileButtom (só grava se o executor tiver writefile/readfile)
 local function loadSavedData()
 	if typeof(readfile) == "function" then
 		local ok, raw = pcall(readfile, SAVE_FILE)
@@ -18,26 +17,33 @@ local function loadSavedData()
 			local okDecode, decoded = pcall(function()
 				return HttpService:JSONDecode(raw)
 			end)
-			if okDecode and typeof(decoded) == "table" and decoded.sensitivity then
-				return { sensitivity = decoded.sensitivity }
+			if okDecode and typeof(decoded) == "table" then
+				return {
+					sensitivity = tonumber(decoded.sensitivity) or DEFAULT_DATA.sensitivity,
+					distance = tonumber(decoded.distance) or DEFAULT_DATA.distance,
+				}
 			end
 		end
 	end
-	return DEFAULT_DATA
-end
-
-local function saveData(data)
-	if typeof(writefile) == "function" then
-		local ok, encoded = pcall(function()
-			return HttpService:JSONEncode(data)
-		end)
-		if ok then
-			pcall(writefile, SAVE_FILE, encoded)
-		end
-	end
+	return { sensitivity = DEFAULT_DATA.sensitivity, distance = DEFAULT_DATA.distance }
 end
 
 local savedData = loadSavedData()
+local saveToken = 0
+local function saveData(data)
+	-- debounce: evita escrever no disco a cada frame de arrasto do slider
+	saveToken += 1
+	local myToken = saveToken
+	task.delay(0.35, function()
+		if myToken ~= saveToken then return end
+		if typeof(writefile) == "function" then
+			local ok, encoded = pcall(function()
+				return HttpService:JSONEncode(data)
+			end)
+			if ok then pcall(writefile, SAVE_FILE, encoded) end
+		end
+	end)
+end
 
 -- Remove GUI anterior (se o script rodar de novo no mesmo teste)
 local oldGui = playerGui:FindFirstChild("SensitivityGuiExecutor")
@@ -58,12 +64,17 @@ local MAX_PITCH = math.rad(85)
 local MIN_DISTANCE = 2
 local HEAD_OFFSET = Vector3.new(0, 2, 0)
 
-local yaw, pitch, distance = 0, 0, 10
+local yaw, pitch = 0, 0
+local desiredDistance = savedData.distance
 local sensitivityMultiplier = savedData.sensitivity
 local overrideEnabled = false -- começa desligado por segurança; liga pelo botão
 
--- Recalcula yaw/pitch/distance a partir de onde a câmera padrão já estava,
--- pra não dar "pulo" visual no exato momento em que a gente assume o controle
+-- Params de raycast reaproveitados (anti-clipping)
+local raycastParams = RaycastParams.new()
+raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+
+-- Recalcula yaw/pitch a partir de onde a câmera padrão já estava,
+-- pra não dar "pulo" visual no momento em que a gente assume o controle
 local function syncFromCurrentCamera(character)
 	local root = character:FindFirstChild("HumanoidRootPart")
 	if not root then return end
@@ -71,17 +82,16 @@ local function syncFromCurrentCamera(character)
 	local target = root.Position + HEAD_OFFSET
 	local dir = camera.CFrame.Position - target
 	if dir.Magnitude < 0.01 then
-		dir = Vector3.new(0, 0, 1) * distance
+		dir = Vector3.new(0, 0, 1)
 	end
 
-	distance = math.max(dir.Magnitude, MIN_DISTANCE)
 	local normalized = dir.Unit
 	yaw = math.atan2(normalized.X, normalized.Z)
-	pitch = math.asin(math.clamp(normalized.Y, -1, 1))
+	pitch = math.clamp(math.asin(math.clamp(normalized.Y, -1, 1)), MIN_PITCH, MAX_PITCH)
 end
 
 local function updateCamera()
-	if not overrideEnabled then return end
+	if not overrideEnabled or not camera then return end
 
 	local character = player.Character
 	if not character then return end
@@ -94,7 +104,16 @@ local function updateCamera()
 		math.sin(pitch),
 		math.cos(pitch) * math.cos(yaw)
 	)
-	local camPos = target + backVector * distance
+
+	-- Anti-clipping: encurta a distância se houver parede entre o alvo e a câmera
+	raycastParams.FilterDescendantsInstances = { character }
+	local effectiveDistance = desiredDistance
+	local hit = workspace:Raycast(target, backVector * desiredDistance, raycastParams)
+	if hit then
+		effectiveDistance = math.max(hit.Distance - 0.25, 0.5)
+	end
+
+	local camPos = target + backVector * effectiveDistance
 	camera.CFrame = CFrame.lookAt(camPos, target)
 end
 
@@ -123,16 +142,16 @@ player.CharacterAdded:Connect(function(character)
 end)
 
 ----------------------------------------------------------------
--- INPUT: TouchPan é o gesto de arrastar na tela (mesmo que a câmera nativa usa)
+-- INPUT: TouchPan é o gesto de arrastar na tela (o mesmo que a câmera nativa usa)
 ----------------------------------------------------------------
 
-local lastTotal = Vector2.new()
+local lastTotal = Vector2.zero
 
 UserInputService.TouchPan:Connect(function(_touchPositions, totalTranslation, _velocity, state)
 	if not overrideEnabled then return end
 
 	if state == Enum.UserInputState.Begin then
-		lastTotal = Vector2.new()
+		lastTotal = Vector2.zero
 		return
 	end
 
@@ -142,14 +161,15 @@ UserInputService.TouchPan:Connect(function(_touchPositions, totalTranslation, _v
 
 		local scale = BASE_SENSITIVITY * sensitivityMultiplier
 		local deltaYaw = -delta.X * scale
-		local deltaPitch = -delta.Y * scale -- inverter aqui se quiser (trocar o sinal)
+		local deltaPitch = delta.Y * scale -- CORRIGIDO: antes era -delta.Y (cima/baixo trocados)
 
 		yaw += deltaYaw
 		pitch = math.clamp(pitch + deltaPitch, MIN_PITCH, MAX_PITCH)
 	end
 end)
 
-RunService:BindToRenderStep("SensitivityCameraOverride", Enum.RenderPriority.Camera.Value, updateCamera)
+local BIND_NAME = "SensitivityCameraOverride"
+RunService:BindToRenderStep(BIND_NAME, Enum.RenderPriority.Camera.Value, updateCamera)
 
 ----------------------------------------------------------------
 -- UI (mesmo estilo visual do MobileButtom)
@@ -161,8 +181,7 @@ screenGui.ResetOnSpawn = false
 screenGui.IgnoreGuiInset = true
 screenGui.Parent = playerGui
 
--- Engrenagem (fica no canto inferior ESQUERDO pra não brigar com o MobileButtom,
--- que usa o canto inferior direito)
+-- Engrenagem no canto inferior ESQUERDO (não briga com o MobileButtom, que usa o direito)
 local gearToggle = Instance.new("TextButton")
 gearToggle.Size = UDim2.new(0, 36, 0, 36)
 gearToggle.Position = UDim2.new(0, 12, 1, -12)
@@ -182,7 +201,7 @@ gearCorner.Parent = gearToggle
 -- Painel
 local panel = Instance.new("Frame")
 panel.Name = "SensitivityPanel"
-panel.Size = UDim2.new(0, 220, 0, 130)
+panel.Size = UDim2.new(0, 220, 0, 205)
 panel.Position = UDim2.new(0, 12, 1, -56)
 panel.AnchorPoint = Vector2.new(0, 1)
 panel.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
@@ -237,7 +256,7 @@ statusButton.Activated:Connect(function()
 	refreshStatusButton()
 end)
 
--- Slider genérico (idêntico ao do MobileButtom)
+-- Slider genérico
 local function createSlider(parent, layoutOrder, labelPrefix, min, max, initial, step, formatFn, onChange)
 	local container = Instance.new("Frame")
 	container.Size = UDim2.new(1, 0, 0, 40)
@@ -334,19 +353,24 @@ local function createSlider(parent, layoutOrder, labelPrefix, min, max, initial,
 
 	refresh()
 
-	return {
-		getValue = function()
-			return currentValue
-		end,
-	}
+	return { getValue = function() return currentValue end }
 end
 
-local sensitivitySlider = createSlider(
+createSlider(
 	panel, 2, "Sensibilidade", 0.1, 3, sensitivityMultiplier, 0.05,
 	function(v) return string.format("%.2fx", v) end,
 	function(v)
 		sensitivityMultiplier = v
-		saveData({ sensitivity = v })
+		saveData({ sensitivity = v, distance = desiredDistance })
+	end
+)
+
+createSlider(
+	panel, 3, "Distância", MIN_DISTANCE, 25, desiredDistance, 0.5,
+	function(v) return string.format("%.0f", v) end,
+	function(v)
+		desiredDistance = v
+		saveData({ sensitivity = sensitivityMultiplier, distance = v })
 	end
 )
 
